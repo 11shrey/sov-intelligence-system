@@ -268,3 +268,74 @@ def test_orchestrator_m3_end_to_end_flow():
 
     # 8. Source data not mutated
     assert state.recommendations == recs_snapshot
+
+
+def test_orchestration_workflow_pause_and_resume():
+    """
+    Focused test for orchestrator requirements:
+    - Agent 1 -> Agent 2 -> Agent 3 execution
+    - Workflow pauses/stops before Agent 4 (AWAITING_REVIEW)
+    - Human decisions are stored
+    - Workflow resumes with Agent 4
+    - Final output is produced with valid Excel
+    """
+    from app.orchestration.state import SOVState
+    from pathlib import Path
+    import pandas as pd
+
+    orchestrator = PipelineOrchestrator()
+    state = orchestrator.create_job(
+        filename="test_workflow_sov.xlsx",
+        file_path="data/uploads/test_workflow_sov.xlsx",
+        file_size_bytes=2048,
+    )
+    job_id = state.job_id
+
+    # Provide state inputs for Agents 1-3
+    orchestrator._jobs[job_id].metadata["raw_columns"] = _SAMPLE_COLUMNS
+    orchestrator._jobs[job_id].metadata["mapped_rows"] = _SAMPLE_MAPPED_ROWS
+
+    # 1. Run start_workflow_until_review (Agent 1 -> Agent 2 -> Agent 3)
+    paused_state = orchestrator.start_workflow_until_review(job_id)
+
+    # Verify Agent 1 -> Agent 2 -> Agent 3 executed
+    assert len(paused_state.sheet_analysis) > 0
+    assert len(paused_state.schema_mapping) > 0
+    assert len(paused_state.quality_issues) > 0
+    assert paused_state.quality_report is not None
+
+    # Verify workflow stopped before Agent 4
+    assert paused_state.status == JobStatus.AWAITING_REVIEW
+    assert len(paused_state.approved_transformations) == 0
+    assert paused_state.final_output is None
+
+    # 2. Human decisions are stored
+    target_issue = paused_state.quality_issues[0]
+    decisions = [
+        ReviewDecision(
+            row=target_issue.row,
+            field=target_issue.field,
+            decision="approve",
+            reviewer="lead_underwriter@carrier.com",
+        )
+    ]
+
+    # 3. Resume workflow with Agent 4
+    completed_state = orchestrator.resume_workflow_after_review(job_id, decisions=decisions)
+
+    # Verify human decisions stored
+    assert len(completed_state.human_decisions) == 1
+    assert completed_state.human_decisions[0].reviewer == "lead_underwriter@carrier.com"
+
+    # Verify Agent 4 ran and final output is produced
+    assert completed_state.status == JobStatus.COMPLETED
+    assert len(completed_state.approved_transformations) == 1
+    assert completed_state.final_output is not None
+
+    # Verify file on disk
+    out_path = Path(completed_state.final_output)
+    assert out_path.exists()
+    df_out = pd.read_excel(out_path, sheet_name="Cleaned SOV")
+    assert len(df_out.columns) == 17
+    assert len(df_out) >= 1
+

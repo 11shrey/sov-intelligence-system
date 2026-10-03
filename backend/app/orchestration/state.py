@@ -127,3 +127,31 @@ class SOVProcessingState(BaseModel):
         default_factory=list,
         description="List of warning or error messages encountered during processing",
     )
+
+    # -------------------------------------------------------------
+    # Convenience Properties matching SOVState requirement names
+    # -------------------------------------------------------------
+    @property
+    def file_path(self) -> str:
+        return self.file_info.file_path if self.file_info else ""
+
+    @property
+    def schema_mapping(self) -> list[SchemaMapping]:
+        return self.schema_mappings
+
+    @property
+    def quality_report(self) -> dict[str, Any] | None:
+        return self.metadata.get("quality_report")
+
+    @property
+    def human_decisions(self) -> list[ReviewDecision]:
+        return self.review_decisions
+
+    @property
+    def final_output(self) -> str | None:
+        return self.final_output_path
+
+
+# Requirement alias: SOVState <-> SOVProcessingState
+SOVState = SOVProcessingState
+
