@@ -1,9 +1,58 @@
 """Test FastAPI endpoints."""
 
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, orchestrator
 
 client = TestClient(app)
+
+_SAMPLE_COLUMNS = [
+    "Loc #", "Street Address", "City", "ST", "Zip Code",
+    "County", "Country", "Bldg Repl Cost", "Contents", "BI Limit",
+    "Occupancy Type", "Const Type", "Stories", "Building Count",
+    "Yr Built", "Fire Prot.", "Other Value",
+]
+
+_SAMPLE_MAPPED_ROWS = [
+    {
+        "Reference": "LOC-001",
+        "Address": "100 Main St",
+        "City": "Houston",
+        "State": "TX",
+        "Zip": "77001",
+        "County": "Harris",
+        "Country": "USA",
+        "Building Value": 5_000_000,
+        "Contents": 500_000,
+        "BI": 200_000,
+        "Occupancy": "Office",
+        "Construction": "Masonry",
+        "Storeys": 4,
+        "Number of Buildings": 1,
+        "Year Built": 2010,
+        "Fire Sprinklers (Y/N)": "Y",
+        "Other": 50_000,
+    },
+    # Duplicate record to generate quality defect and recommendation
+    {
+        "Reference": "LOC-001",
+        "Address": "100 Main St",
+        "City": "Houston",
+        "State": "TX",
+        "Zip": "77001",
+        "County": "Harris",
+        "Country": "USA",
+        "Building Value": 5_000_000,
+        "Contents": 500_000,
+        "BI": 200_000,
+        "Occupancy": "Office",
+        "Construction": "Masonry",
+        "Storeys": 4,
+        "Number of Buildings": 1,
+        "Year Built": 2010,
+        "Fire Sprinklers (Y/N)": "Y",
+        "Other": 50_000,
+    },
+]
 
 
 def test_health_check():
@@ -26,6 +75,11 @@ def test_full_api_workflow():
     job_id = job_data["job_id"]
     assert job_id is not None
     assert job_data["status"] == "awaiting_review"
+
+    # Inject sample metadata for Agent 2 & Agent 3 (since Agent 1 is a stub workbook reader)
+    orchestrator._jobs[job_id].metadata["raw_columns"] = _SAMPLE_COLUMNS
+    orchestrator._jobs[job_id].metadata["mapped_rows"] = _SAMPLE_MAPPED_ROWS
+    orchestrator.run_analysis_pipeline(job_id)
 
     # 2. Get Job Status
     status_response = client.get(f"/api/jobs/{job_id}")

@@ -34,16 +34,56 @@ class HumanReviewService:
         """
         Retrieve recommendations and quality issues awaiting human review.
 
+        Enforces the routing policy:
+          - PASS: No issues created, continues automatically.
+          - LOW: Recorded in audit information, excluded from human-review inbox.
+          - MEDIUM: Included in human-review inbox (requires_human_review is True).
+          - HIGH: Included in human-review inbox (requires_human_review is True).
+
         Args:
             state (SOVProcessingState): Current pipeline state.
 
         Returns:
-            dict[str, Any]: Bundle of quality issues and recommendations.
+            dict[str, Any]: Bundle of quality issues and recommendations awaiting human review.
         """
+        def _requires_review(item: Any) -> bool:
+            if hasattr(item, "requires_human_review"):
+                return bool(getattr(item, "requires_human_review", False))
+            if isinstance(item, dict):
+                return bool(item.get("requires_human_review", False))
+            return False
+
+        pending_issues = [
+            issue for issue in state.quality_issues
+            if _requires_review(issue)
+        ]
+
+        if len(state.quality_issues) == len(state.recommendations):
+            pending_recommendations = [
+                rec
+                for rec, issue in zip(state.recommendations, state.quality_issues)
+                if _requires_review(issue)
+            ]
+        else:
+            def _get_key(item: Any) -> tuple[Any, Any]:
+                if hasattr(item, "row") and hasattr(item, "field"):
+                    return (getattr(item, "row"), getattr(item, "field"))
+                if isinstance(item, dict):
+                    return (item.get("row"), item.get("field"))
+                return (None, None)
+
+            review_keys = {_get_key(issue) for issue in pending_issues}
+            pending_recommendations = [
+                rec
+                for rec in state.recommendations
+                if _get_key(rec) in review_keys
+            ]
+
         return {
             "job_id": state.job_id,
             "status": state.status,
-            "quality_issues": state.quality_issues,
-            "recommendations": state.recommendations,
+            "quality_issues": pending_issues,
+            "recommendations": pending_recommendations,
             "review_decisions_count": len(state.review_decisions),
         }
+
