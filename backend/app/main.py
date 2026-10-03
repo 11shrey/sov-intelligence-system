@@ -217,9 +217,9 @@ async def get_job_audit_trail(job_id: str) -> AuditTrailReport:
     tags=["Export"],
     summary="Download standardized cleaned SOV file",
 )
-async def download_cleaned_sov(job_id: str) -> Response:
+async def download_cleaned_sov(job_id: str, format: str | None = None) -> Response:
     """
-    Stream or download the finalized cleaned SOV spreadsheet.
+    Stream or download the finalized cleaned SOV spreadsheet (.xlsx or .csv).
     """
     state = orchestrator.get_job_state(job_id)
     if not state:
@@ -233,7 +233,28 @@ async def download_cleaned_sov(job_id: str) -> Response:
             detail="Cleaned SOV has not been generated yet. Run transformations first.",
         )
 
-    # Return placeholder response content for Phase 2
+    if os.path.exists(state.final_output_path):
+        from fastapi.responses import FileResponse
+        if format == "csv":
+            import pandas as pd
+            import io
+            df = pd.read_excel(state.final_output_path, sheet_name="Cleaned SOV")
+            csv_buf = io.StringIO()
+            df.to_csv(csv_buf, index=False)
+            return Response(
+                content=csv_buf.getvalue(),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.csv"
+                },
+            )
+        return FileResponse(
+            path=state.final_output_path,
+            filename=f"Cleaned_SOV_{job_id}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # Return placeholder response content if file is not on disk
     dummy_csv = "Reference,Address,City,State,Zip,Building Value\nLOC-1,123 Main St,Chicago,IL,60601,1000000\n"
     return Response(
         content=dummy_csv,
