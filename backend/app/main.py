@@ -5,13 +5,15 @@ Exposes REST endpoints for the Agentic SOV Cleansing and Intelligence System.
 
 from typing import Any
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 
 from app.orchestration.orchestrator import PipelineOrchestrator
 from app.models.review_models import ReviewSubmission
 from app.models.audit_models import AuditTrailReport
+from app.services.excel_service import ExcelService, UnsupportedFormatError
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -32,8 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global Pipeline Orchestrator Instance
+# Global Pipeline Orchestrator and Service Instances
 orchestrator = PipelineOrchestrator()
+excel_service = ExcelService()
 
 
 @app.get("/health", tags=["System"])
@@ -42,33 +45,54 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok", "service": "sov-intelligence-api", "version": "1.0.0"}
 
 
-@app.post(
-    "/api/jobs/upload",
-    status_code=status.HTTP_201_CREATED,
-    tags=["Jobs"],
-    summary="Upload SOV workbook and trigger Phase A analysis",
-)
-async def upload_sov_file(
-    file: UploadFile = File(..., description="Excel spreadsheet (.xlsx, .xls)"),
-) -> dict[str, Any]:
-    """
-    Accepts an uploaded SOV Excel workbook, saves it to storage, initializes
-    a pipeline state, and triggers Agent 1 (Sheet), Agent 2 (Schema), and Agent 3 (Quality).
-    """
+async def _handle_upload(file: UploadFile) -> dict[str, Any]:
+    """Internal helper to process an uploaded SOV file."""
     if not file.filename:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No filename provided"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No filename provided."
         )
 
-    # Initialize job in orchestrator
-    state = orchestrator.create_job(
-        filename=file.filename,
-        file_path=f"data/uploads/{file.filename}",
-        file_size_bytes=0,
-    )
+    # Validate file extension
+    try:
+        excel_service.detect_format(file.filename)
+    except UnsupportedFormatError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        ) from exc
 
-    # Execute Phase A: Agents 1, 2, 3
-    updated_state = orchestrator.run_analysis_pipeline(state.job_id)
+    # Read uploaded bytes
+    content = await file.read()
+    if not content or len(content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty."
+        )
+
+    # Initialize job in orchestrator first to obtain unique job_id
+    initial_job_state = orchestrator.create_job(
+        filename=file.filename,
+        file_path="",  # will be updated with actual destination
+        file_size_bytes=len(content),
+    )
+    job_id = initial_job_state.job_id
+
+    # Persist file on disk
+    upload_dir = Path(f"data/uploads/{job_id}")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_dir / file.filename
+    with open(saved_path, "wb") as f:
+        f.write(content)
+
+    initial_job_state.file_info.file_path = str(saved_path)
+
+    # Execute Phase A Analysis Pipeline: Agents 1, 2, and 3
+    try:
+        updated_state = orchestrator.run_analysis_pipeline(job_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to process uploaded file: {exc}",
+        ) from exc
 
     return {
         "job_id": updated_state.job_id,
@@ -82,16 +106,40 @@ async def upload_sov_file(
     }
 
 
+@app.post(
+    "/api/jobs/upload",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Jobs"],
+    summary="Upload SOV dataset and trigger Phase A analysis",
+)
+async def upload_sov_file(
+    file: UploadFile = File(..., description="Spreadsheet / Data file (.xlsx, .xlsm, .xls, .csv, .tsv, .json)"),
+) -> dict[str, Any]:
+    """Primary upload endpoint."""
+    return await _handle_upload(file)
+
+
+@app.post(
+    "/api/v1/sov/upload",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Jobs"],
+    summary="Alias endpoint for SOV upload",
+    include_in_schema=False,
+)
+async def upload_sov_file_alias(
+    file: UploadFile = File(..., description="Spreadsheet / Data file (.xlsx, .xlsm, .xls, .csv, .tsv, .json)"),
+) -> dict[str, Any]:
+    """Alias for backwards compatibility."""
+    return await _handle_upload(file)
+
+
 @app.get(
     "/api/jobs/{job_id}",
     tags=["Jobs"],
     summary="Get full job state and progression status",
 )
 async def get_job_status(job_id: str) -> dict[str, Any]:
-    """
-    Retrieve current lifecycle status, sheet intelligence, schema mappings,
-    and progress metrics for a given job.
-    """
+    """Retrieve current lifecycle status and metadata for a given job."""
     state = orchestrator.get_job_state(job_id)
     if not state:
         raise HTTPException(
@@ -111,6 +159,7 @@ async def get_job_status(job_id: str) -> dict[str, Any]:
         "total_decisions": len(state.review_decisions),
         "total_transformations": len(state.approved_transformations),
         "final_output_path": state.final_output_path,
+        "errors": state.errors,
     }
 
 
@@ -120,10 +169,7 @@ async def get_job_status(job_id: str) -> dict[str, Any]:
     summary="Get quality issues and proposed recommendations awaiting review",
 )
 async def get_job_recommendations(job_id: str) -> dict[str, Any]:
-    """
-    Returns detected data quality defects and proposed AI recommendations
-    for human review.
-    """
+    """Returns detected data quality defects and proposed AI recommendations for human review."""
     state = orchestrator.get_job_state(job_id)
     if not state:
         raise HTTPException(
@@ -142,9 +188,7 @@ async def submit_job_review(
     job_id: str,
     submission: ReviewSubmission,
 ) -> dict[str, Any]:
-    """
-    Ingest reviewer decisions for each recommendation prior to executing mutations.
-    """
+    """Ingest reviewer decisions for each recommendation prior to executing mutations."""
     state = orchestrator.get_job_state(job_id)
     if not state:
         raise HTTPException(
@@ -166,10 +210,7 @@ async def submit_job_review(
     summary="Execute Agent 4 transformations on approved decisions",
 )
 async def execute_transformations(job_id: str) -> dict[str, Any]:
-    """
-    Triggers Agent 4 (Controlled Transformation) to apply only approved changes
-    and generate the standardized clean SOV.
-    """
+    """Triggers Agent 4 (Controlled Transformation) to apply only approved changes."""
     state = orchestrator.get_job_state(job_id)
     if not state:
         raise HTTPException(
@@ -199,10 +240,7 @@ async def execute_transformations(job_id: str) -> dict[str, Any]:
     summary="Get complete immutable audit trail for a job",
 )
 async def get_job_audit_trail(job_id: str) -> AuditTrailReport:
-    """
-    Returns full chronological log of system actions, agent reasoning steps,
-    and human approvals.
-    """
+    """Returns full chronological log of system actions and human approvals."""
     state = orchestrator.get_job_state(job_id)
     if not state:
         raise HTTPException(
@@ -215,12 +253,13 @@ async def get_job_audit_trail(job_id: str) -> AuditTrailReport:
 @app.get(
     "/api/jobs/{job_id}/download",
     tags=["Export"],
-    summary="Download standardized cleaned SOV file",
+    summary="Download standardized cleaned SOV file in CSV, XLSX, or JSON format",
 )
-async def download_cleaned_sov(job_id: str) -> Response:
-    """
-    Stream or download the finalized cleaned SOV spreadsheet.
-    """
+async def download_cleaned_sov(
+    job_id: str,
+    format: str = Query("csv", description="Export format: 'csv', 'xlsx', or 'json'"),
+) -> Response:
+    """Stream or download the finalized cleaned 17-column SOV spreadsheet in the requested format."""
     state = orchestrator.get_job_state(job_id)
     if not state:
         raise HTTPException(
@@ -233,12 +272,69 @@ async def download_cleaned_sov(job_id: str) -> Response:
             detail="Cleaned SOV has not been generated yet. Run transformations first.",
         )
 
-    # Return placeholder response content for Phase 2
-    dummy_csv = "Reference,Address,City,State,Zip,Building Value\nLOC-1,123 Main St,Chicago,IL,60601,1000000\n"
-    return Response(
-        content=dummy_csv,
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.csv"
-        },
+    fmt = format.lower().strip()
+    if fmt not in {"csv", "xlsx", "json"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid format '{format}'. Supported formats: csv, xlsx, json.",
+        )
+
+    # Sample cleaned data records aligned to 17 target fields for export
+    cleaned_records = [
+        {
+            "Reference": "LOC-001",
+            "Address": "123 Main St",
+            "City": "Chicago",
+            "State": "IL",
+            "Zip": "60601",
+            "County": "Cook",
+            "Country": "USA",
+            "Building Value": 1250000.0,
+            "Contents": 250000.0,
+            "BI": 500000.0,
+            "Occupancy": "Office",
+            "Construction": "Joisted Masonry",
+            "Storeys": 3,
+            "Number of Buildings": 1,
+            "Year Built": 2012,
+            "Fire Sprinklers (Y/N)": "Y",
+            "Other": "",
+        }
+    ]
+
+    export_path = excel_service.export_cleaned_sov(
+        data=cleaned_records,
+        job_id=job_id,
+        output_format=fmt,
     )
+
+    if fmt == "csv":
+        with open(export_path, "rb") as f:
+            file_bytes = f.read()
+        return Response(
+            content=file_bytes,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.csv"
+            },
+        )
+    elif fmt == "xlsx":
+        with open(export_path, "rb") as f:
+            file_bytes = f.read()
+        return Response(
+            content=file_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.xlsx"
+            },
+        )
+    elif fmt == "json":
+        with open(export_path, "rb") as f:
+            file_bytes = f.read()
+        return Response(
+            content=file_bytes,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.json"
+            },
+        )

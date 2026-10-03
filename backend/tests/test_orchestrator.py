@@ -1,18 +1,31 @@
 """Test Pipeline Orchestrator flow."""
 
+from pathlib import Path
+from openpyxl import Workbook
+import pytest
+
 from app.orchestration.orchestrator import PipelineOrchestrator
 from app.orchestration.state import JobStatus
 from app.models.review_models import ReviewDecision, ReviewSubmission
 
 
-def test_orchestrator_complete_lifecycle():
+def test_orchestrator_complete_lifecycle(tmp_path: Path):
     """Verify orchestrator coordinates the complete lifecycle end-to-end."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Locations"
+    ws.append(["Reference", "Address", "City", "State", "Zip", "Building Value"])
+    ws.append(["LOC-01", "500 Main St", "Houston", "TX", "77002", 2500000])
+
+    wb_path = tmp_path / "broker_submission.xlsx"
+    wb.save(wb_path)
+
     orchestrator = PipelineOrchestrator()
 
     # 1. Job Creation
     state = orchestrator.create_job(
-        filename="broker_submission.xlsx",
-        file_path="data/uploads/broker_submission.xlsx",
+        filename=wb_path.name,
+        file_path=str(wb_path),
         file_size_bytes=5000,
     )
     job_id = state.job_id
