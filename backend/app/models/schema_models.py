@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -28,22 +29,36 @@ TARGET_SOV_FIELDS: list[str] = [field.value for field in TargetSOVField]
 
 
 class SchemaMapping(BaseModel):
-    """Mapping from a source column in the raw sheet to a target SOV field."""
+    """Mapping from a source column in the raw sheet to a target SOV field.
+
+    target_field may be None when a source column could not be mapped to any
+    of the 17 canonical fields (status will be 'rejected' or 'needs_review').
+    """
 
     source_column: str = Field(..., description="Original column header from the raw file")
-    target_field: str = Field(
-        ...,
-        description="Target standard SOV field name (or 'Unmapped' if not mapped)",
+    target_field: Optional[str] = Field(
+        default=None,
+        description="Target standard SOV field name, or None if unmapped/rejected",
     )
     confidence: float = Field(
         ..., ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0"
     )
     method: str = Field(
         ...,
-        description="Mapping methodology (e.g. 'exact_match', 'fuzzy_match', 'llm_semantic', 'manual')",
+        description=(
+            "Mapping methodology: 'exact', 'normalized', 'semantic_alias', "
+            "'fuzzy', 'heuristic', 'llm', or 'unmapped'"
+        ),
     )
     reasoning: str = Field(
         ..., description="Explanation/justification for why this mapping was chosen"
+    )
+    status: Optional[str] = Field(
+        default=None,
+        description=(
+            "Mapping review status: 'approved', 'needs_review', or 'rejected'. "
+            "None means the status has not been set."
+        ),
     )
 
 
