@@ -24,6 +24,8 @@ POSITIVE_SHEET_SIGNALS: Final[list[str]] = [
     "location data",
     "exposure data",
     "schedule of values",
+    "statement of values",
+    "property values",
     "property",
     "properties",
     "locations",
@@ -31,6 +33,7 @@ POSITIVE_SHEET_SIGNALS: Final[list[str]] = [
     "sov",
     "schedule",
     "exposure",
+    "values",
 ]
 
 # Negative sheet name signals with word boundaries
@@ -47,6 +50,17 @@ NEGATIVE_SHEET_SIGNALS: Final[list[str]] = [
     "toc",
     "index",
     "glossary",
+    # Exclusion, archive, and inactive table signals
+    "deleted",
+    "delete",
+    "removed",
+    "archived",
+    "archive",
+    "obsolete",
+    "inactive",
+    "historical",
+    "superseded",
+    "elsewhere",
 ]
 
 
@@ -215,9 +229,12 @@ class PrimaryTableSelector:
             usable_records = 0
             data_density = 0.0
 
-        # Sheet name analysis
-        sheet_score, name_reason = self._score_sheet_name(sheet_name)
+        # Sheet name analysis: check negative contextual signals first
         neg_penalty, neg_reason = self._check_negative_signals(sheet_name)
+        has_negative = neg_penalty > 0.0
+        sheet_score, name_reason = self._score_sheet_name(
+            sheet_name, has_negative_signal=has_negative
+        )
 
         # Composite table scoring
         reasoning: list[str] = []
@@ -292,12 +309,21 @@ class PrimaryTableSelector:
             reasoning=reasoning,
         )
 
-    def _score_sheet_name(self, sheet_name: str) -> tuple[float, str | None]:
-        """Detect positive sheet name signals using word boundary matching."""
+    def _score_sheet_name(
+        self, sheet_name: str, has_negative_signal: bool = False
+    ) -> tuple[float, str | None]:
+        """Detect positive sheet name signals using word boundary matching.
+
+        A generic positive keyword (such as 'locations' or 'values') must NOT override
+        or be awarded to a sheet with strong negative business context (such as
+        'Deleted Locations', 'Archived Locations', etc.).
+        """
+        if has_negative_signal:
+            return 0.0, None
         clean_name = sheet_name.strip().lower()
         for pat in self._compiled_positive:
             if pat.search(clean_name):
-                return 0.10, f"Positive sheet name signal matched: +0.10"
+                return 0.10, "Positive sheet name signal matched: +0.10"
         return 0.0, None
 
     def _check_negative_signals(self, sheet_name: str) -> tuple[float, str | None]:

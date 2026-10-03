@@ -493,3 +493,40 @@ def test_agent1_agent2_handoff_contract(tmp_path: Path):
     assert "canonical_mapping" not in data
     assert '"Building Cost ($)": "building_value"' not in raw_str
     assert '"Site": "address"' not in raw_str
+
+
+def test_real_workbook_sov_q8b3_e2e():
+    """End-to-end integration test against the real production workbook SOV_Q8B3.xlsx."""
+    sov_path = Path("SOV_Q8B3.xlsx")
+    if not sov_path.exists():
+        pytest.skip("SOV_Q8B3.xlsx not present in backend root")
+
+    result = analyze_file(sov_path, job_id="SOV_Q8B3")
+
+    # 1. Primary selected sheet is the active SOV schedule, NOT Deleted Locations
+    assert result.selected_sheet == "23-24 Values"
+    assert result.header_row == 0
+    assert result.confidence >= 0.85
+    assert result.total_rows == 864
+    assert result.is_near_tie is False
+
+    # 2. Raw headers preserved verbatim
+    assert result.raw_headers[0] == "SW"
+    assert "2023 Building Value" in result.raw_headers
+    assert "2023 Contents Value" in result.raw_headers
+
+    # 3. Sample rows preserved verbatim with populated active values
+    assert len(result.sample_rows) == 5
+    assert result.sample_rows[0][3] == "Adolescent Treatment Center"
+
+    # 4. Deleted Locations and Insured Elsewhere penalized and not selected
+    eval_map = {s.sheet_name: s for s in result.all_sheets_evaluated}
+    assert "Deleted Locations" in eval_map
+    assert any("Negative sheet name signal matched: -0.25" in r for r in eval_map["Deleted Locations"].reasoning)
+    assert any("Negative sheet name signal matched: -0.25" in r for r in eval_map["Insured Elsewhere"].reasoning)
+
+    # 5. Agent 1 -> Agent 2 handoff contract validity
+    data = json.loads(result.model_dump_json())
+    assert "schema_mapping" not in data
+    assert data["selected_sheet"] == "23-24 Values"
+
