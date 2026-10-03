@@ -1,6 +1,40 @@
 from datetime import datetime, timezone
-from typing import Any
+from enum import Enum
+from typing import Any, Optional
 from pydantic import BaseModel, Field
+
+
+class ApprovalStatus(str, Enum):
+    """
+    The three possible outcomes recorded in an audit entry.
+
+    Mapping from ReviewDecision.decision:
+        ACCEPT  →  ACCEPTED
+        REJECT  →  REJECTED
+        EDIT    →  EDITED
+    """
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    EDITED = "EDITED"
+
+
+class AuditRecord(BaseModel):
+    """
+    Immutable record capturing everything about a single field transformation.
+    """
+    source_field: str
+    target_field: str
+    before_value: Optional[Any] = None
+    after_value: Optional[Any] = None
+    transformation: str
+    confidence: float
+    approval_status: ApprovalStatus
+    approver: str
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    model_config = {"frozen": True}
 
 
 class AuditEntry(BaseModel):

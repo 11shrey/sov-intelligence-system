@@ -119,10 +119,17 @@ def test_full_api_workflow():
     assert audit_response.status_code == 200
     assert audit_response.json()["total_entries"] > 0
 
-    # 7. Download Cleaned Output
+    # 7. Download Cleaned Output (.xlsx default, or .csv if requested)
     download_response = client.get(f"/api/jobs/{job_id}/download")
     assert download_response.status_code == 200
-    assert "text/csv" in download_response.headers.get("content-type", "")
+    assert (
+        "application/vnd.openxmlformats" in download_response.headers.get("content-type", "")
+        or "text/csv" in download_response.headers.get("content-type", "")
+    )
+
+    download_csv_response = client.get(f"/api/jobs/{job_id}/download?format=csv")
+    assert download_csv_response.status_code == 200
+    assert "text/csv" in download_csv_response.headers.get("content-type", "")
 
 
 def test_job_not_found():
