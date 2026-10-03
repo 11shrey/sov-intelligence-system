@@ -26,7 +26,7 @@ import uuid
 
 from app.orchestration.state import SOVProcessingState, FileInfo, JobStatus
 from app.agents.sheet_agent import SheetIntelligenceAgent
-from app.agents.schema_agent import SchemaMappingAgent
+from app.agents.schema_agent import SchemaMappingAgent, LLMAdapter
 from app.agents.quality_agent import DataQualityAgent
 from app.agents.transformation_agent import ControlledTransformationAgent
 from app.review.human_review import HumanReviewService
@@ -41,7 +41,7 @@ class PipelineOrchestrator:
 
     def __init__(self):
         self.sheet_agent = SheetIntelligenceAgent()
-        self.schema_agent = SchemaMappingAgent()
+        self.schema_agent = SchemaMappingAgent(llm_adapter=LLMAdapter())
         self.quality_agent = DataQualityAgent()
         self.transformation_agent = ControlledTransformationAgent()
         self.review_service = HumanReviewService()
