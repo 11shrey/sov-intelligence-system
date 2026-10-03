@@ -106,7 +106,6 @@ class SheetIntelligenceAgent:
         file_path = self._get_file_path(state)
         sheet_names = self.excel_service.get_sheet_names(file_path)
 
-        analyses_with_counts: list[tuple[SheetAnalysis, int]] = []
         analyses: list[SheetAnalysis] = []
 
         for sheet_name in sheet_names:
@@ -116,15 +115,14 @@ class SheetIntelligenceAgent:
                 max_rows=30,
             )
 
-            analysis, data_row_count = self._analyze_sheet(
+            analysis = self._analyze_sheet(
                 sheet_name=sheet_name,
                 rows=rows,
             )
 
             analyses.append(analysis)
-            analyses_with_counts.append((analysis, data_row_count))
 
-        selected = self._select_primary_sheet(analyses_with_counts)
+        selected = self._select_primary_sheet(analyses)
         state.sheet_analysis = analyses
 
         if selected is not None:
@@ -154,17 +152,16 @@ class SheetIntelligenceAgent:
         self,
         sheet_name: str,
         rows: list[list[Any]],
-    ) -> tuple[SheetAnalysis, int]:
-        """Analyse one sheet and produce its SheetAnalysis alongside data row count."""
+    ) -> SheetAnalysis:
+        """Analyse one sheet and produce its SheetAnalysis."""
         if not rows:
-            analysis = SheetAnalysis(
+            return SheetAnalysis(
                 sheet_name=sheet_name,
                 is_candidate=False,
                 header_row=None,
                 confidence=0.0,
                 reasoning="The sheet is empty or contains no readable rows.",
             )
-            return analysis, 0
 
         header_row, matched_headers, matched_concepts, header_score = self._detect_header_row(rows)
 
@@ -195,14 +192,13 @@ class SheetIntelligenceAgent:
             confidence=confidence,
         )
 
-        analysis = SheetAnalysis(
+        return SheetAnalysis(
             sheet_name=sheet_name,
             is_candidate=is_candidate,
             header_row=header_row,
             confidence=confidence,
             reasoning=reasoning,
         )
-        return analysis, data_row_count
 
     def _detect_header_row(
         self,
@@ -374,18 +370,18 @@ class SheetIntelligenceAgent:
 
     def _select_primary_sheet(
         self,
-        analyses_with_counts: list[tuple[SheetAnalysis, int]],
+        analyses: list[SheetAnalysis],
     ) -> SheetAnalysis | None:
-        """Select primary SOV sheet breaking ties with confidence, then data row count."""
+        """Select primary SOV sheet breaking ties with confidence score."""
         candidates = [
-            (analysis, count)
-            for analysis, count in analyses_with_counts
+            analysis
+            for analysis in analyses
             if analysis.is_candidate and analysis.header_row is not None
         ]
 
         if not candidates:
             return None
 
-        # Sort: 1) Confidence descending, 2) Data row count descending
-        candidates.sort(key=lambda item: (item[0].confidence, item[1]), reverse=True)
-        return candidates[0][0]
+        # Sort by confidence descending
+        candidates.sort(key=lambda item: item.confidence, reverse=True)
+        return candidates[0]
