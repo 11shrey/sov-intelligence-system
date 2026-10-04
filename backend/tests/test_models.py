@@ -1,10 +1,18 @@
 """Test Pydantic models and data contracts."""
 
+import pytest
 from datetime import datetime
+from pydantic import ValidationError
 from app.models.sheet_models import SheetAnalysis
 from app.models.schema_models import SchemaMapping, TARGET_SOV_FIELDS, TargetSOVField
 from app.models.quality_models import QualityIssue, Recommendation
-from app.models.review_models import ReviewDecision, ReviewSubmission
+from app.models.review_models import (
+    ReviewDecision,
+    ReviewSubmission,
+    DecisionType,
+    ReviewRecommendation,
+    FieldReviewDecision,
+)
 from app.models.transformation_models import Transformation
 from app.models.audit_models import AuditEntry
 from app.orchestration.state import SOVProcessingState, FileInfo, JobStatus
@@ -130,3 +138,159 @@ def test_shared_state_instantiation():
     assert state.review_decisions == []
     assert state.approved_transformations == []
     assert state.audit_log == []
+
+
+# ===========================================================================
+# Member 3 integration tests — ReviewRecommendation and FieldReviewDecision
+# ===========================================================================
+
+class TestReviewRecommendation:
+    """Tests for the ReviewRecommendation model (Member 3 integration)."""
+
+    def test_valid_review_recommendation(self):
+        """A fully populated ReviewRecommendation with valid confidence should pass."""
+        rec = ReviewRecommendation(
+            source_field="Building Value",
+            target_field="total_insured_value",
+            current_value="1,000,000",
+            recommendation=1_000_000,
+            confidence=0.95,
+            reasoning="Value matches standard TIV format after stripping commas.",
+        )
+        assert rec.source_field == "Building Value"
+        assert rec.target_field == "total_insured_value"
+        assert rec.confidence == 0.95
+
+    def test_review_recommendation_optional_fields_default_none(self):
+        """current_value and recommendation are optional and default to None."""
+        rec = ReviewRecommendation(
+            source_field="Location",
+            target_field="location_name",
+            confidence=0.5,
+            reasoning="Direct column match.",
+        )
+        assert rec.current_value is None
+        assert rec.recommendation is None
+
+    def test_review_recommendation_confidence_boundary_zero(self):
+        """confidence = 0.0 is valid (minimum boundary)."""
+        rec = ReviewRecommendation(
+            source_field="f", target_field="t",
+            confidence=0.0, reasoning="No idea.",
+        )
+        assert rec.confidence == 0.0
+
+    def test_review_recommendation_confidence_boundary_one(self):
+        """confidence = 1.0 is valid (maximum boundary)."""
+        rec = ReviewRecommendation(
+            source_field="f", target_field="t",
+            confidence=1.0, reasoning="Perfect match.",
+        )
+        assert rec.confidence == 1.0
+
+    def test_review_recommendation_invalid_confidence_above_one(self):
+        """confidence > 1.0 must raise a ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            ReviewRecommendation(
+                source_field="f", target_field="t",
+                confidence=1.5, reasoning="Over-confident agent.",
+            )
+        assert "confidence" in str(exc_info.value).lower()
+
+    def test_review_recommendation_invalid_confidence_negative(self):
+        """confidence < 0.0 must raise a ValidationError."""
+        with pytest.raises(ValidationError):
+            ReviewRecommendation(
+                source_field="f", target_field="t",
+                confidence=-0.1, reasoning="Negative confidence.",
+            )
+
+
+class TestFieldReviewDecision:
+    """Tests for the FieldReviewDecision model (Member 3 integration)."""
+
+    def test_valid_accept(self):
+        """ACCEPT decision with no edited_value should pass."""
+        decision = FieldReviewDecision(
+            source_field="Building Value",
+            target_field="total_insured_value",
+            decision=DecisionType.ACCEPT,
+            approver="alice",
+        )
+        assert decision.decision == DecisionType.ACCEPT
+        assert decision.edited_value is None
+
+    def test_valid_reject(self):
+        """REJECT decision with no edited_value should pass."""
+        decision = FieldReviewDecision(
+            source_field="Building Value",
+            target_field="total_insured_value",
+            decision=DecisionType.REJECT,
+            approver="bob",
+        )
+        assert decision.decision == DecisionType.REJECT
+        assert decision.edited_value is None
+
+    def test_valid_edit(self):
+        """EDIT decision with an edited_value should pass."""
+        decision = FieldReviewDecision(
+            source_field="Building Value",
+            target_field="total_insured_value",
+            decision=DecisionType.EDIT,
+            edited_value=2_000_000,
+            approver="carol",
+        )
+        assert decision.decision == DecisionType.EDIT
+        assert decision.edited_value == 2_000_000
+
+    def test_edit_without_edited_value_fails(self):
+        """EDIT decision with no edited_value must raise a ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            FieldReviewDecision(
+                source_field="Building Value",
+                target_field="total_insured_value",
+                decision=DecisionType.EDIT,
+                # edited_value intentionally omitted
+                approver="carol",
+            )
+        assert "edited_value" in str(exc_info.value).lower()
+
+    def test_empty_approver_fails(self):
+        """An empty (or whitespace-only) approver must raise a ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            FieldReviewDecision(
+                source_field="Building Value",
+                target_field="total_insured_value",
+                decision=DecisionType.ACCEPT,
+                approver="   ",  # whitespace only — should be rejected
+            )
+        assert "approver" in str(exc_info.value).lower()
+
+    def test_blank_approver_empty_string_fails(self):
+        """An explicit empty string for approver must also fail."""
+        with pytest.raises(ValidationError):
+            FieldReviewDecision(
+                source_field="f", target_field="t",
+                decision=DecisionType.REJECT,
+                approver="",
+            )
+
+    def test_accept_with_explicit_none_edited_value(self):
+        """Explicitly passing edited_value=None for ACCEPT should be fine."""
+        decision = FieldReviewDecision(
+            source_field="f", target_field="t",
+            decision=DecisionType.ACCEPT,
+            edited_value=None,
+            approver="dave",
+        )
+        assert decision.edited_value is None
+
+    def test_decision_type_string_coercion(self):
+        """Passing the string 'ACCEPT' should coerce to DecisionType.ACCEPT."""
+        decision = FieldReviewDecision(
+            source_field="f", target_field="t",
+            decision="ACCEPT",  # plain string
+            approver="eve",
+        )
+        assert decision.decision == DecisionType.ACCEPT
+

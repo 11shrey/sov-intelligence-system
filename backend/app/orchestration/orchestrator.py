@@ -21,17 +21,22 @@ Intended Flow:
   Cleaned Standardized SOV Export
 """
 
-from typing import Any
+from typing import Any, List
 import uuid
+from pathlib import Path
+import pandas as pd
 
-from app.orchestration.state import SOVProcessingState, FileInfo, JobStatus
+import logging
+from app.orchestration.state import SOVProcessingState, SOVState, FileInfo, JobStatus, SheetAnalysis
 from app.agents.sheet_agent import SheetIntelligenceAgent
 from app.agents.schema_agent import SchemaMappingAgent, LLMAdapter
+logger = logging.getLogger(__name__)
 from app.agents.quality_agent import DataQualityAgent
 from app.agents.transformation_agent import ControlledTransformationAgent
 from app.review.human_review import HumanReviewService
 from app.audit.audit_service import AuditService
-from app.models.review_models import ReviewSubmission
+from app.models.review_models import ReviewDecision, ReviewSubmission
+from app.services.excel_service import ExcelOutputService, STANDARD_FIELDS
 
 
 class PipelineOrchestrator:
@@ -96,13 +101,40 @@ class PipelineOrchestrator:
         """
         Execute Phase A of the pipeline: Agent 1 -> Agent 2 -> Agent 3.
         Brings state to AWAITING_REVIEW status.
+        Stops before Agent 4 (Human Review Pause).
         """
         state = self._jobs.get(job_id)
         if not state:
             raise ValueError(f"Job {job_id} not found")
 
         # Step 1: Sheet Intelligence (Agent 1)
-        state = self.sheet_agent.run(state)
+        file_path_str = state.file_info.file_path if state.file_info else ""
+        if file_path_str and Path(file_path_str).exists():
+            try:
+                from app.agents.sheet_intelligence import analyze_file
+                handoff = analyze_file(file_path_str, job_id=state.job_id)
+                state.selected_sheet = handoff.selected_sheet
+                state.header_row = handoff.header_row
+                state.status = JobStatus.SHEET_ANALYZED
+                if handoff.raw_headers and "raw_columns" not in state.metadata:
+                    state.metadata["raw_columns"] = handoff.raw_headers
+                # Populate sheet_analysis summary
+                state.sheet_analysis = [
+                    SheetAnalysis(
+                        sheet_name=a.sheet_name,
+                        is_candidate=a.is_candidate,
+                        header_row=a.header_row,
+                        confidence=a.confidence,
+                        reasoning="; ".join(a.reasoning) if isinstance(a.reasoning, list) else str(a.reasoning),
+                    )
+                    for a in handoff.all_sheets_evaluated
+                ]
+            except Exception as e:
+                logger.warning("Agent 1 analysis_file failed: %s. Falling back to sheet_agent.run()", e)
+                state = self.sheet_agent.run(state)
+        else:
+            state = self.sheet_agent.run(state)
+
         self.audit_service.log_event(
             state=state,
             user_id="agent_1_sheet_intelligence",
@@ -112,6 +144,9 @@ class PipelineOrchestrator:
             before=None,
             after={"selected_sheet": state.selected_sheet, "header_row": state.header_row},
         )
+
+        # Thin Adapter: Extract raw headers from file if not already provided in metadata
+        self._adapt_agent1_to_agent2(state)
 
         # Step 2: Schema Mapping (Agent 2)
         state = self.schema_agent.run(state)
@@ -124,6 +159,9 @@ class PipelineOrchestrator:
             before=None,
             after={"mapped_columns_count": len(state.schema_mappings)},
         )
+
+        # Thin Adapter: Map raw rows into canonical-keyed records for Agent 3 if not present
+        self._adapt_agent2_to_agent3(state)
 
         # Step 3: Data Quality & Reasoning (Agent 3)
         state = self.quality_agent.run(state)
@@ -140,8 +178,14 @@ class PipelineOrchestrator:
             },
         )
 
-        # State is now in AWAITING_REVIEW
+        # State is now in AWAITING_REVIEW — Human Review Pause
+        state.status = JobStatus.AWAITING_REVIEW
         return state
+
+    # Alias method matching requirements
+    def start_workflow_until_review(self, job_id: str) -> SOVProcessingState:
+        """Run workflow from upload up until human review pause."""
+        return self.run_analysis_pipeline(job_id)
 
     def apply_human_review(
         self, job_id: str, submission: ReviewSubmission
@@ -179,6 +223,9 @@ class PipelineOrchestrator:
         if not state:
             raise ValueError(f"Job {job_id} not found")
 
+        if state.status != JobStatus.REVIEW_COMPLETED and not state.review_decisions:
+            raise ValueError("Human review decisions are required before running Agent 4 transformation.")
+
         # Step 4: Controlled Transformation (Agent 4)
         state = self.transformation_agent.run(state)
 
@@ -194,3 +241,93 @@ class PipelineOrchestrator:
         )
 
         return state
+
+    # Alias method matching requirements
+    def resume_workflow_after_review(
+        self, job_id: str, decisions: list[ReviewDecision] | None = None
+    ) -> SOVProcessingState:
+        """Resume workflow after human review decisions by executing Agent 4."""
+        state = self._jobs.get(job_id)
+        if not state:
+            raise ValueError(f"Job {job_id} not found")
+
+        if decisions:
+            self.apply_human_review(job_id, ReviewSubmission(decisions=decisions))
+
+        return self.run_transformation_pipeline(job_id)
+
+    # ------------------------------------------------------------------
+    # Thin Adapters connecting Agent 1, Agent 2, Agent 3 data contracts
+    # ------------------------------------------------------------------
+    def _adapt_agent1_to_agent2(self, state: SOVProcessingState) -> None:
+        """Ensure state.metadata['raw_columns'] is populated for Agent 2."""
+        if "raw_columns" in state.metadata and state.metadata["raw_columns"]:
+            return
+
+        file_path_str = state.file_info.file_path if state.file_info else ""
+        if not file_path_str:
+            return
+
+        path = Path(file_path_str)
+        if not path.exists():
+            return
+
+        try:
+            sheet_name = state.selected_sheet or 0
+            header_row = state.header_row if state.header_row is not None else 0
+
+            if path.suffix.lower() in (".xlsx", ".xls", ".xlsm"):
+                df_headers = pd.read_excel(path, sheet_name=sheet_name, header=header_row, nrows=1)
+                raw_cols = [str(c).strip() for c in df_headers.columns if str(c).strip()]
+                state.metadata["raw_columns"] = raw_cols
+            elif path.suffix.lower() == ".csv":
+                df_headers = pd.read_csv(path, header=header_row, nrows=1)
+                raw_cols = [str(c).strip() for c in df_headers.columns if str(c).strip()]
+                state.metadata["raw_columns"] = raw_cols
+        except Exception:
+            pass
+
+    def _adapt_agent2_to_agent3(self, state: SOVProcessingState) -> None:
+        """Map raw file data rows into canonical schema rows for Agent 3."""
+        if "mapped_rows" in state.metadata and state.metadata["mapped_rows"]:
+            return
+
+        file_path_str = state.file_info.file_path if state.file_info else ""
+        if not file_path_str or not state.schema_mappings:
+            return
+
+        path = Path(file_path_str)
+        if not path.exists():
+            return
+
+        try:
+            sheet_name = state.selected_sheet or 0
+            header_row = state.header_row if state.header_row is not None else 0
+
+            if path.suffix.lower() in (".xlsx", ".xls", ".xlsm"):
+                df_data = pd.read_excel(path, sheet_name=sheet_name, header=header_row)
+            elif path.suffix.lower() == ".csv":
+                df_data = pd.read_csv(path, header=header_row)
+            else:
+                return
+
+            col_to_target = {
+                m.source_column: m.target_field
+                for m in state.schema_mappings
+                if m.target_field and m.target_field != "unmapped"
+            }
+
+            mapped_rows: list[dict[str, Any]] = []
+            for _, row in df_data.iterrows():
+                row_dict: dict[str, Any] = {}
+                for col in df_data.columns:
+                    target_field = col_to_target.get(str(col).strip())
+                    if target_field:
+                        row_dict[target_field] = row[col]
+                mapped_rows.append(row_dict)
+
+            state.metadata["mapped_rows"] = mapped_rows
+            if "source_rows" not in state.metadata:
+                state.metadata["source_rows"] = mapped_rows
+        except Exception:
+            pass

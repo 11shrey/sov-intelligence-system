@@ -229,9 +229,9 @@ async def get_job_audit_trail(job_id: str) -> AuditTrailReport:
     tags=["Export"],
     summary="Download standardized cleaned SOV file",
 )
-async def download_cleaned_sov(job_id: str) -> Response:
+async def download_cleaned_sov(job_id: str, format: str | None = None) -> Response:
     """
-    Stream or download the finalized cleaned SOV spreadsheet.
+    Stream or download the finalized cleaned SOV spreadsheet (.xlsx or .csv).
     """
     state = orchestrator.get_job_state(job_id)
     if not state:
@@ -245,7 +245,28 @@ async def download_cleaned_sov(job_id: str) -> Response:
             detail="Cleaned SOV has not been generated yet. Run transformations first.",
         )
 
-    # Return placeholder response content for Phase 2
+    if os.path.exists(state.final_output_path):
+        from fastapi.responses import FileResponse
+        if format == "csv":
+            import pandas as pd
+            import io
+            df = pd.read_excel(state.final_output_path, sheet_name="Cleaned SOV")
+            csv_buf = io.StringIO()
+            df.to_csv(csv_buf, index=False)
+            return Response(
+                content=csv_buf.getvalue(),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.csv"
+                },
+            )
+        return FileResponse(
+            path=state.final_output_path,
+            filename=f"Cleaned_SOV_{job_id}.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # Return placeholder response content if file is not on disk
     dummy_csv = "Reference,Address,City,State,Zip,Building Value\nLOC-1,123 Main St,Chicago,IL,60601,1000000\n"
     return Response(
         content=dummy_csv,
@@ -253,4 +274,174 @@ async def download_cleaned_sov(job_id: str) -> Response:
         headers={
             "Content-Disposition": f"attachment; filename=cleaned_sov_{job_id}.csv"
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Direct /jobs/* Endpoints (Standard Workflow Specification)
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/jobs",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Jobs"],
+    summary="Create a job, upload an SOV file, and run Agent 1 -> Agent 2 -> Agent 3",
+)
+async def create_and_start_job(
+    file: UploadFile = File(..., description="Uploaded SOV file (.xlsx, .csv)"),
+) -> dict[str, Any]:
+    """
+    POST /jobs
+    - Accept an uploaded SOV file
+    - Save it to local storage
+    - Create a job in orchestrator
+    - Invoke existing orchestrator start workflow (Agent 1 -> Agent 2 -> Agent 3)
+    - Returns job_id and current status
+    """
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No filename provided"
+        )
+
+    # Save uploaded file
+    upload_dir = Path("data/uploads")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_dir / file.filename
+
+    content = await file.read()
+    with open(saved_path, "wb") as f:
+        f.write(content)
+
+    state = orchestrator.create_job(
+        filename=file.filename,
+        file_path=str(saved_path),
+        file_size_bytes=len(content),
+    )
+
+    # Run workflow until human review (Agent 1 -> Agent 2 -> Agent 3)
+    updated_state = orchestrator.start_workflow_until_review(state.job_id)
+
+    return {
+        "job_id": updated_state.job_id,
+        "status": updated_state.status,
+        "file_info": updated_state.file_info,
+        "selected_sheet": updated_state.selected_sheet,
+        "header_row": updated_state.header_row,
+        "total_issues": len(updated_state.quality_issues),
+        "total_recommendations": len(updated_state.recommendations),
+        "message": "Job created and analysis completed. Awaiting human review.",
+    }
+
+
+@app.get(
+    "/jobs/{job_id}/review",
+    tags=["Review"],
+    summary="Get review information required by frontend (mappings, issues, recommendations, status)",
+)
+async def get_human_review_data(job_id: str) -> dict[str, Any]:
+    """
+    GET /jobs/{job_id}/review
+    - Return the information required by the frontend for human review:
+      - schema mappings
+      - quality issues
+      - recommendations
+      - current job status
+    """
+    state = orchestrator.get_job_state(job_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found"
+        )
+
+    return {
+        "job_id": state.job_id,
+        "status": state.status,
+        "selected_sheet": state.selected_sheet,
+        "header_row": state.header_row,
+        "schema_mappings": state.schema_mappings,
+        "quality_issues": state.quality_issues,
+        "recommendations": state.recommendations,
+        "quality_report": state.quality_report,
+        "total_issues": len(state.quality_issues),
+        "total_recommendations": len(state.recommendations),
+    }
+
+
+@app.post(
+    "/jobs/{job_id}/review",
+    tags=["Review"],
+    summary="Submit human review decisions and execute Agent 4 transformation",
+)
+async def submit_human_review_and_resume(
+    job_id: str,
+    submission: ReviewSubmission,
+) -> dict[str, Any]:
+    """
+    POST /jobs/{job_id}/review
+    - Accept human review decisions
+    - Pass them to existing orchestrator apply_human_review / resume_workflow_after_review
+    - Invoke Agent 4 only after valid review decisions
+    - Return final status and output information
+    """
+    state = orchestrator.get_job_state(job_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found"
+        )
+
+    if not submission.decisions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one human review decision is required.",
+        )
+
+    # Ingest decisions and run Agent 4
+    updated_state = orchestrator.resume_workflow_after_review(job_id, decisions=submission.decisions)
+
+    return {
+        "job_id": updated_state.job_id,
+        "status": updated_state.status,
+        "decisions_recorded": len(submission.decisions),
+        "transformations_applied": len(updated_state.approved_transformations),
+        "final_output_path": updated_state.final_output_path,
+        "download_url": f"/jobs/{job_id}/output",
+    }
+
+
+@app.get(
+    "/jobs/{job_id}/output",
+    tags=["Export"],
+    summary="Download the generated Cleaned_SOV.xlsx workbook",
+)
+async def get_cleaned_sov_output(job_id: str) -> Response:
+    """
+    GET /jobs/{job_id}/output
+    - Return / download the generated Cleaned_SOV.xlsx
+    - Blocks if Agent 4 has not executed yet
+    """
+    from fastapi.responses import FileResponse
+
+    state = orchestrator.get_job_state(job_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found"
+        )
+
+    if not state.final_output_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cleaned SOV has not been generated yet. Complete human review first.",
+        )
+
+    file_path = Path(state.final_output_path)
+    if file_path.exists():
+        return FileResponse(
+            path=str(file_path),
+            filename="Cleaned_SOV.xlsx",
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"Output file {state.final_output_path} not found on server.",
     )

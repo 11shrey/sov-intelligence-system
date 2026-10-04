@@ -10,7 +10,7 @@ class SheetAnalysis(BaseModel):
     )
     header_row: int | None = Field(
         default=None,
-        description="Detected 0-indexed or 1-indexed row number containing headers, if identified",
+        description="0-indexed row number containing headers (matches pandas header=N, UI may display +1), or None if not identified",
     )
     confidence: float = Field(
         ..., ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0"
