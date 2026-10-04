@@ -408,3 +408,135 @@ def test_realistic_broker_multi_sheet_workbook(selector: PrimaryTableSelector):
     assert candidate_map["Instructions"].is_candidate is False
     assert candidate_map["Summary"].is_candidate is False
     assert candidate_map["Property Schedule"].is_candidate is True
+
+
+# =====================================================================
+# 21. Real-World Regression Test: SOV_Q8B3 Multi-Sheet Pattern
+# =====================================================================
+
+
+def test_sov_q8b3_active_vs_deleted_and_secondary_tables(selector: PrimaryTableSelector):
+    """Regression test for SOV_Q8B3 workbook pattern.
+
+    Verifies:
+    1. Active SOV ('23-24 Values') wins over 'Deleted Locations' and 'Insured Elsewhere'.
+    2. 'Deleted Locations' and 'Insured Elsewhere' receive appropriate negative context.
+    3. Large unrelated sheets ('All Autos', 'Equipment') do not win merely because they have more rows.
+    4. 'Locations' by itself remains a useful positive signal.
+    5. 'Deleted Locations' does NOT receive a positive sheet-name bonus.
+    6. Agent 1 remains deterministic.
+    7. Raw headers and unmapped values are preserved verbatim.
+    """
+    # Active primary SOV table (23-24 Values)
+    active_headers = [
+        "SW", "Loc #", "Bldg #", "Complex/Facility", "Building", "Address", "Zip", "County",
+        "Dept", "Sq. Ft.", "Yr. Built", "Construction", "%Sprink", "2023 Building Value",
+        "2023 Contents Value", "BI Value", "2023 TOTAL"
+    ]
+    active_rows = [
+        [i, f"LOC-{i}", f"BLDG-{i}", "Municipal Complex", "Office Hall", f"{100+i} Main St", 75201, "Dallas",
+         "CIV", 25000, 1995, "Masonry", 100, 5000000 + i * 100000, 1000000, 500000, 6500000]
+        for i in range(1, 35)
+    ]
+
+    # Deleted Locations table (dead records, $0 values, deletion notes)
+    deleted_headers = [
+        "Loc #", "Bldg #", "Complex/Facility", "Building", "Address", "Zip", "County",
+        "Dept", "Sq. Ft.", "Yr. Built", "Construction", "Building Value", "Contents Value",
+        "BI Value", "TOTAL", "NOTES"
+    ]
+    deleted_rows = [
+        [f"LOC-{i}", f"BLDG-{i}", "Old Complex", "Demolished Annex", f"{500+i} Elm St", 75202, "Dallas",
+         "AVI", 12000, 1960, "Steel", 0, 0, None, 0, "Marked for deletion in 2022 SOV"]
+        for i in range(1, 25)
+    ]
+
+    # Insured Elsewhere table (secondary coverage excluded from primary policy)
+    elsewhere_headers = [
+        "Loc #", "Bldg #", "Complex/Facility", "Building", "Address", "Zip", "County",
+        "Dept", "Sq. Ft.", "Yr. Built", "Construction", "Building Value", "Contents Value", "TOTAL"
+    ]
+    elsewhere_rows = [
+        [f"LOC-{i}", f"BLDG-{i}", "Port Terminal", "Hangar Facility", f"{900+i} Airport Way", 75261, "Dallas",
+         "AVI", 80000, 2005, "Non-Combustible", 15000000, 2000000, 17000000]
+        for i in range(1, 20)
+    ]
+
+    # Large fleet schedule (All Autos: 100 rows, automotive fleet fields)
+    autos_headers = [
+        "Using Dept", "Dept Description", "Unit No", "Unit Description", "Operational Class",
+        "Serial Number", "Model Year"
+    ]
+    autos_rows = [
+        ["DFD", "Fire Rescue", f"UNIT-{i}", "Emergency Ambulance", "TRUCK", f"1HGFA{i:06d}", 2021]
+        for i in range(1, 101)
+    ]
+
+    # Equipment schedule (80 rows)
+    equipment_headers = [
+        "Dept", "Division", "Unit #", "Equipment Desc", "Serial #", "Acquisition Year"
+    ]
+    equipment_rows = [
+        ["PBW", "Public Works", f"EQ-{i}", "Diesel Generator Trailer", f"SN{i:06d}", 2018]
+        for i in range(1, 81)
+    ]
+
+    workbook = {
+        "Questions": [["Questions and Broker Notes"], ["Submission deadline passed."]],
+        "23-24 Values": [active_headers] + active_rows,
+        "All Autos": [autos_headers] + autos_rows,
+        "Equipment": [equipment_headers] + equipment_rows,
+        "Deleted Locations": [deleted_headers] + deleted_rows,
+        "Insured Elsewhere": [elsewhere_headers] + elsewhere_rows,
+    }
+
+    result1 = selector.select_primary_table(workbook)
+    result2 = selector.select_primary_table(workbook)
+
+    # 1. Active SOV wins decisively
+    assert result1.selected_sheet == "23-24 Values"
+    assert result1.selected_header_row == 0
+    assert result1.confidence >= 0.85
+    assert result1.is_near_tie is False
+
+    # 2. Deleted and Elsewhere receive appropriate negative context
+    candidate_map = {c.sheet_name: c for c in result1.candidates}
+    del_cand = candidate_map["Deleted Locations"]
+    else_cand = candidate_map["Insured Elsewhere"]
+    active_cand = candidate_map["23-24 Values"]
+
+    assert any("Negative sheet name signal matched: -0.25" in r for r in del_cand.reasoning)
+    assert any("Negative sheet name signal matched: -0.25" in r for r in else_cand.reasoning)
+    assert active_cand.final_score > del_cand.final_score
+    assert active_cand.final_score > else_cand.final_score
+
+    # 3. Large unrelated sheets (Autos 100 rows, Equipment 80 rows) do NOT win
+    autos_cand = candidate_map["All Autos"]
+    assert autos_cand.final_score < active_cand.final_score
+
+    # 4 & 5. 'Deleted Locations' does NOT receive positive signal
+    assert not any("Positive sheet name signal matched" in r for r in del_cand.reasoning)
+
+    # 6. Determinism: identical results across repeated runs
+    assert result1.selected_sheet == result2.selected_sheet
+    assert result1.confidence == result2.confidence
+    assert result1.selected_header_row == result2.selected_header_row
+
+    # 7. Raw headers preserved verbatim
+    assert result1.raw_headers == active_headers
+
+
+def test_positive_locations_signal_retained_when_active(selector: PrimaryTableSelector):
+    """Verify that 'Locations' and 'Property Locations' still receive positive signal when not negated."""
+    active_sov = {
+        "Property Locations": [
+            ["Loc ID", "Street Address", "City", "State", "Zip", "Building Cost", "Occupancy"],
+            ["001", "100 Elm St", "Chicago", "IL", "60601", 1500000, "Office"],
+            ["002", "200 Elm St", "Chicago", "IL", "60602", 2500000, "Retail"],
+        ]
+    }
+    result = selector.select_primary_table(active_sov)
+    assert result.selected_sheet == "Property Locations"
+    cand = result.candidates[0]
+    assert any("Positive sheet name signal matched: +0.10" in r for r in cand.reasoning)
+
