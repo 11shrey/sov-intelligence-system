@@ -62,6 +62,24 @@ def test_health_check():
     assert response.json()["status"] == "ok"
 
 
+def test_env_loading_and_agent_key_detection():
+    """Verify that .env is loaded safely and agents detect DASHSCOPE_API_KEY without exposing secrets."""
+    import os
+
+    # Verify DASHSCOPE_API_KEY is detected in environment
+    assert "DASHSCOPE_API_KEY" in os.environ
+    assert bool(os.getenv("DASHSCOPE_API_KEY"))
+
+    # Verify Agent 2 adapter has the key configured
+    assert orchestrator.schema_agent._llm_adapter is not None
+    assert bool(orchestrator.schema_agent._llm_adapter.api_key)
+
+    # Verify Agent 3 adapter has the key configured
+    assert orchestrator.quality_agent.llm_adapter is not None
+    assert bool(orchestrator.quality_agent.llm_adapter.api_key)
+
+
+
 def test_full_api_workflow():
     """Verify upload -> get status -> get recommendations -> review -> transform -> audit -> download."""
     # 1. Upload

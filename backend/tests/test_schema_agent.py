@@ -601,3 +601,91 @@ class TestSchemaMappingAgentPipeline:
         targets = {m.target_field for m in updated_state.schema_mappings}
         assert "Reference" in targets
         assert "Building Value" in targets
+
+
+# ===========================================================================
+# 16. Value-Aware Evidence Tests
+# ===========================================================================
+
+class TestValueAwareEvidence:
+
+    def test_floor_with_integers_confirms_storeys(self):
+        rows = [{"#Floor": 2}, {"#Floor": 1}, {"#Floor": 4}]
+        result = map_schema(rows)
+        m = next(m for m in result.mappings if m.source_column == "#Floor")
+        assert m.target_field == "Storeys"
+        assert m.status == _STATUS_APPROVED
+        assert m.confidence >= _CONFIDENCE_APPROVED
+        assert "confirm floor/story" in m.reasoning
+
+    def test_yr_built_with_four_digit_years_confirms_year_built(self):
+        rows = [{"Yr. Built": "1990"}, {"Yr. Built": "1977"}, {"Yr. Built": "1965"}]
+        result = map_schema(rows)
+        m = next(m for m in result.mappings if m.source_column == "Yr. Built")
+        assert m.target_field == "Year Built"
+        assert m.status == _STATUS_APPROVED
+        assert "confirm 4-digit construction years" in m.reasoning
+
+    def test_construction_with_material_keywords_confirms_construction(self):
+        rows = [{"Construction": "Masonry"}, {"Construction": "Steel Frame"}, {"Construction": "Frame"}]
+        result = map_schema(rows)
+        m = next(m for m in result.mappings if m.source_column == "Construction")
+        assert m.target_field == "Construction"
+        assert m.status == _STATUS_APPROVED
+
+    def test_sprinklers_with_indicators_confirms_sprinklers(self):
+        rows = [{"%Sprink": "Yes"}, {"%Sprink": "No"}, {"%Sprink": "100%"}]
+        result = map_schema(rows)
+        m = next(m for m in result.mappings if m.source_column == "%Sprink")
+        assert m.target_field == "Fire Sprinklers (Y/N)"
+        assert m.confidence >= 0.70
+
+    def test_financial_value_with_monetary_floats_confirms_building_value(self):
+        rows = [{"2023 Building Value": 1068367.75}, {"2023 Building Value": 10172.1}]
+        result = map_schema(rows)
+        m = next(m for m in result.mappings if m.source_column == "2023 Building Value")
+        assert m.target_field == "Building Value"
+        assert m.confidence >= 0.75
+
+
+# ===========================================================================
+# 17. Negative Evidence and Rejection Tests
+# ===========================================================================
+
+class TestNegativeEvidence:
+
+    def test_roof_construction_rejected_from_construction(self):
+        m = map_single_column("Roof Construction")
+        assert m.target_field != "Construction"
+
+    def test_reconstruction_date_rejected_from_year_built(self):
+        m = map_single_column("Reconstruction Date")
+        assert m.target_field != "Year Built"
+
+    def test_valuation_year_rejected_from_year_built(self):
+        m = map_single_column("Year of Marshall Swift Valution")
+        assert m.target_field != "Year Built"
+
+    def test_risk_assessment_year_rejected_from_year_built(self):
+        m = map_single_column("Year of Property Risk Assement")
+        assert m.target_field != "Year Built"
+
+    def test_sq_ft_rejected_from_building_value(self):
+        m = map_single_column("Sq. Ft. ")
+        assert m.target_field != "Building Value"
+
+    def test_total_isolated_from_financial_fields(self):
+        m = map_single_column("2023 TOTAL")
+        assert m.target_field not in ("Building Value", "Contents", "BI", "Other")
+
+
+# ===========================================================================
+# 18. Confidence Margin Tests
+# ===========================================================================
+
+class TestConfidenceMargin:
+
+    def test_ambiguous_column_routes_to_needs_review(self):
+        m = map_single_column("value_2")
+        assert m.status == _STATUS_NEEDS_REVIEW
+
