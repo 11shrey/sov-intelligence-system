@@ -130,6 +130,8 @@ _ALIAS_TABLE: dict[str, str] = {
     "property_reference": "Reference",
     "policy reference": "Reference",
     "policy_reference": "Reference",
+    "policy ref": "Reference",
+    "policy_ref": "Reference",
     "loc": "Reference",
     "loc #": "Reference",
     "loc#": "Reference",
@@ -148,6 +150,18 @@ _ALIAS_TABLE: dict[str, str] = {
     "ref no": "Reference",
     "id": "Reference",
     "record id": "Reference",
+    "bldg #": "Reference",
+    "bldg no": "Reference",
+    "bldg no.": "Reference",
+    "building number": "Reference",
+    "building no": "Reference",
+    "building no.": "Reference",
+    "building num": "Reference",
+    "building id": "Reference",
+    "building ref": "Reference",
+    "sw": "Reference",
+    "schedule #": "Reference",
+    "schedule no": "Reference",
 
     # Address
     "street address": "Address",
@@ -212,8 +226,9 @@ _ALIAS_TABLE: dict[str, str] = {
     "replacement_cost": "Building Value",
     "bldg repl cost": "Building Value",
     "bldg value": "Building Value",
+    "bldg val": "Building Value",
+    "building val": "Building Value",
     "building rcv": "Building Value",
-    "building tiv": "Building Value",
     "building rc": "Building Value",
     "bldg rcv": "Building Value",
     "bldg limit": "Building Value",
@@ -258,6 +273,19 @@ _ALIAS_TABLE: dict[str, str] = {
     "use type": "Occupancy",
     "occupancy": "Occupancy",
     "primary use": "Occupancy",
+    "complex/facility": "Occupancy",
+    "complex facility": "Occupancy",
+    "facility/complex": "Occupancy",
+    "facility complex": "Occupancy",
+    "facility": "Occupancy",
+    "facility name": "Occupancy",
+    "facility type": "Occupancy",
+    "complex": "Occupancy",
+    "complex name": "Occupancy",
+    "operation": "Occupancy",
+    "operations": "Occupancy",
+    "nature of business": "Occupancy",
+    "business type": "Occupancy",
 
     # Construction
     "construction type": "Construction",
@@ -292,6 +320,11 @@ _ALIAS_TABLE: dict[str, str] = {
     "no. of stories": "Storeys",
     "number of floors": "Storeys",
     "# stories": "Storeys",
+    "#floor": "Storeys",
+    "# floor": "Storeys",
+    "floor": "Storeys",
+    "floors": "Storeys",
+    "story": "Storeys",
 
     # Number of Buildings
     "building count": "Number of Buildings",
@@ -318,6 +351,8 @@ _ALIAS_TABLE: dict[str, str] = {
     "yr. built": "Year Built",
     "yr blt": "Year Built",
     "year blt": "Year Built",
+    "year built": "Year Built",
+    "built year": "Year Built",
 
     # Fire Sprinklers (Y/N)
     "sprinklers": "Fire Sprinklers (Y/N)",
@@ -330,6 +365,9 @@ _ALIAS_TABLE: dict[str, str] = {
     "fire protection": "Fire Sprinklers (Y/N)",
     "sprinkler": "Fire Sprinklers (Y/N)",
     "sprinklered": "Fire Sprinklers (Y/N)",
+    "%sprink": "Fire Sprinklers (Y/N)",
+    "% sprink": "Fire Sprinklers (Y/N)",
+    "sprink": "Fire Sprinklers (Y/N)",
 
     # Other
     "other value": "Other",
@@ -365,9 +403,9 @@ def _is_semantically_safe(norm_source: str, target_field: str) -> bool:
         norm_source in tiv_tokens
         or ("tiv" in source_tokens)
         or ({"total", "insured", "value"}.issubset(source_tokens))
+        or ("total" in source_tokens and target_field in ("Building Value", "Contents", "BI", "Other"))
     ):
-        if target_field != "Other":
-            return False
+        return False
 
     # 2. Reject purely irrelevant metadata tokens
     irrelevant_tokens = {
@@ -414,6 +452,15 @@ def _is_semantically_safe(norm_source: str, target_field: str) -> bool:
     if target_field == "Construction":
         if source_tokens.intersection({"cost", "value", "val", "price", "limit", "usd", "expense", "rcv"}):
             return False
+        # Timestamp, date, or component update protection
+        if source_tokens.intersection({"date", "dt", "time", "day", "month", "year", "yr", "history", "update", "updates"}):
+            return False
+        if "roof" in source_tokens and "construction" in source_tokens and len(source_tokens) > 1:
+            return False
+
+    if target_field in ("Building Value", "Contents", "BI", "Other"):
+        if source_tokens.intersection({"total", "tiv", "sq ft", "sqft", "area", "square", "count", "num"}):
+            return False
 
     # 8. Target-specific semantic evidence requirement
     def _matches_any(synonyms: list[str], threshold: float = 75.0) -> bool:
@@ -424,7 +471,9 @@ def _is_semantically_safe(norm_source: str, target_field: str) -> bool:
         return False
 
     if target_field == "Reference":
-        return _matches_any(["ref", "reference", "loc", "location", "property", "site", "id"])
+        if norm_source in {"building", "structure", "complex", "facility"}:
+            return False
+        return _matches_any(["ref", "reference", "loc", "location", "property", "site", "id", "sw", "bldg", "schedule"])
     elif target_field == "Address":
         return _matches_any(["address", "addr", "street", "strt", "location"])
     elif target_field == "City":
@@ -446,17 +495,23 @@ def _is_semantically_safe(norm_source: str, target_field: str) -> bool:
     elif target_field == "BI":
         return _matches_any(["bi", "business", "interruption", "income", "loss"])
     elif target_field == "Occupancy":
-        return _matches_any(["occupancy", "occ", "use", "purpose"])
+        return _matches_any(["occupancy", "occ", "use", "purpose", "facility", "complex", "operation", "business", "dept"])
     elif target_field == "Construction":
         return _matches_any(["construction", "const", "material", "class", "structure", "framing", "masonry", "frame"])
     elif target_field == "Storeys":
+        if source_tokens.intersection({"year", "built", "cost", "value", "area", "sq ft", "sqft"}):
+            return False
         return _matches_any(["storey", "storeys", "story", "stories", "floor", "floors", "level"])
     elif target_field == "Number of Buildings":
+        if source_tokens.intersection({"value", "cost", "limit", "area", "sq ft", "sqft", "story", "storeys", "floor", "floors"}):
+            return False
         return _matches_any(["building", "bldg"]) and _matches_any(["count", "num", "number", "quantity", "qty"])
     elif target_field == "Year Built":
+        if source_tokens.intersection({"reconstruction", "risk", "assessment", "valuation", "inspection", "update", "updates", "date", "change"}):
+            return False
         return _matches_any(["year", "yr"]) and _matches_any(["built", "blt", "const", "constructed"])
     elif target_field == "Fire Sprinklers (Y/N)":
-        return _matches_any(["fire", "sprinkler", "sprinklers", "prot"])
+        return _matches_any(["fire", "sprinkler", "sprinklers", "prot", "sprink"])
     elif target_field == "Other":
         return _matches_any(["other", "additional", "misc", "miscellaneous"])
 
@@ -731,13 +786,93 @@ class _MappingResult:
 # Stage-by-Stage Matching Engine
 # ---------------------------------------------------------------------------
 
+def _evaluate_value_evidence(
+    target_field: str,
+    sample_values: Optional[list[Any]],
+) -> tuple[float, str]:
+    """
+    Evaluates sample data values against canonical target domain patterns.
+    Returns (score_adjustment: float, reasoning_note: str).
+    """
+    if not sample_values:
+        return 0.0, ""
+
+    non_empty = [
+        v for v in sample_values
+        if v is not None and str(v).strip() != "" and str(v).strip().lower() != "null"
+    ]
+    if not non_empty:
+        return 0.0, ""
+
+    if target_field == "Year Built":
+        years = 0
+        for v in non_empty:
+            m = re.match(r"^(\d{4})$", str(v).strip())
+            if m and 1700 <= int(m.group(1)) <= 2030:
+                years += 1
+        if years / len(non_empty) >= 0.5:
+            return 0.08, "Sample values confirm 4-digit construction years."
+
+    elif target_field == "Storeys":
+        floors = 0
+        for v in non_empty:
+            try:
+                val = float(str(v).strip())
+                if 1 <= val <= 150:
+                    floors += 1
+            except (ValueError, TypeError):
+                pass
+        if floors / len(non_empty) >= 0.5:
+            return 0.08, "Sample values confirm floor/story count numbers."
+
+    elif target_field == "Construction":
+        construction_terms = {
+            "masonry", "frame", "steel", "wood", "metal", "concrete",
+            "brick", "cmu", "joisted", "fire resistive", "non combustible",
+        }
+        matches = sum(1 for v in non_empty if any(ct in str(v).lower() for ct in construction_terms))
+        if matches / len(non_empty) >= 0.3:
+            return 0.08, "Sample values confirm standard construction material classifications."
+
+    elif target_field == "Fire Sprinklers (Y/N)":
+        sprinkler_terms = {
+            "y", "n", "yes", "no", "true", "false", "1", "0",
+            "100%", "partial", "none", "y13", "y(13r)",
+        }
+        matches = sum(1 for v in non_empty if str(v).strip().lower() in sprinkler_terms or "%" in str(v))
+        if matches / len(non_empty) >= 0.3:
+            return 0.08, "Sample values confirm fire sprinkler indicators."
+
+    elif target_field in ("Building Value", "Contents", "BI", "Other"):
+        nums = 0
+        for v in non_empty:
+            try:
+                clean = re.sub(r"[\$,]", "", str(v).strip())
+                val = float(clean)
+                if val >= 0:
+                    nums += 1
+            except (ValueError, TypeError):
+                pass
+        if nums / len(non_empty) >= 0.5:
+            return 0.05, "Sample values confirm monetary coverage limits."
+
+    elif target_field == "Occupancy":
+        text_matches = sum(1 for v in non_empty if isinstance(v, str) and len(v.strip()) > 3)
+        if text_matches / len(non_empty) >= 0.5:
+            return 0.05, "Sample values confirm building use / occupancy descriptions."
+
+    return 0.0, ""
+
+
 def _map_single_column_internal(
     source_col: str,
     agent1_suggestion: Optional[dict[str, Any]] = None,
     llm_adapter: Optional[LLMAdapter] = None,
+    sample_values: Optional[list[Any]] = None,
+    all_source_columns: Optional[list[str]] = None,
 ) -> SchemaMapping:
     """
-    Deterministic cascade + Semantic LLM router for a single source column.
+    Deterministic cascade + Value-aware evidence + Semantic LLM router for a single source column.
     Returns a SchemaMapping (shared contract).
     """
     norm_source = _normalise(source_col)
@@ -749,6 +884,21 @@ def _map_single_column_internal(
             confidence=0.0,
             method="unmapped",
             reasoning=f"Empty or unparseable source column '{source_col}'.",
+            status=_STATUS_REJECTED,
+        )
+
+    # ── Cross-Column Context: Total / TIV isolation ──────────────────────
+    source_tokens = set(norm_source.split())
+    if "total" in source_tokens or norm_source in {"total", "tiv", "total tiv", "total value", "total insured value"}:
+        return SchemaMapping(
+            source_column=source_col,
+            target_field=None,
+            confidence=0.0,
+            method="unmapped",
+            reasoning=(
+                f"Column '{source_col}' identified as aggregate total/TIV in schedule; "
+                "quarantined to protect individual property coverage targets."
+            ),
             status=_STATUS_REJECTED,
         )
 
@@ -777,15 +927,31 @@ def _map_single_column_internal(
             )
 
     # ── Stage 3: Curated Domain Alias lookup ──────────────────────────────
+    matched_alias_target = None
+    matched_norm_text = None
     if norm_source in _NORMALIZED_ALIAS_TABLE:
-        target = _NORMALIZED_ALIAS_TABLE[norm_source]
-        if target in CANONICAL_SOV_FIELDS:
+        matched_alias_target = _NORMALIZED_ALIAS_TABLE[norm_source]
+        matched_norm_text = norm_source
+    else:
+        # Check for policy-year prefix (e.g. "2023 building value" -> "building value")
+        clean_norm = re.sub(r"^(?:19|20)\d{2}\s+|^\d{2}[-/]\d{2}\s+", "", norm_source).strip()
+        if clean_norm and clean_norm in _NORMALIZED_ALIAS_TABLE:
+            matched_alias_target = _NORMALIZED_ALIAS_TABLE[clean_norm]
+            matched_norm_text = clean_norm
+
+    if matched_alias_target and matched_alias_target in CANONICAL_SOV_FIELDS:
+        if _is_semantically_safe(norm_source, matched_alias_target):
+            val_bonus, val_note = _evaluate_value_evidence(matched_alias_target, sample_values)
+            conf = min(1.0, 0.95 + val_bonus)
+            reason = f"Source column '{source_col}' matched curated alias -> '{matched_alias_target}'."
+            if val_note:
+                reason += f" {val_note}"
             return SchemaMapping(
                 source_column=source_col,
-                target_field=target,
-                confidence=0.95,
+                target_field=matched_alias_target,
+                confidence=conf,
                 method="semantic_alias",
-                reasoning=f"Source column '{source_col}' matched curated alias -> '{target}'.",
+                reasoning=reason,
                 status=_STATUS_APPROVED,
             )
 
@@ -793,42 +959,56 @@ def _map_single_column_internal(
     fuzzy_candidates = list(CANONICAL_SOV_FIELDS) + list(_ALIAS_TABLE.keys())
     all_norm_candidates = [_normalise(c) for c in fuzzy_candidates]
 
-    best_result = fuzz_process.extractOne(
+    best_results = fuzz_process.extract(
         norm_source,
         all_norm_candidates,
         scorer=fuzz.token_sort_ratio,
+        limit=5,
     )
+
+    valid_candidates: list[tuple[str, float, str]] = []
+    seen_targets: set[str] = set()
+
+    for match_norm, score, idx in (best_results or []):
+        cand_raw = fuzzy_candidates[idx]
+        target = cand_raw if cand_raw in CANONICAL_SOV_FIELDS else _ALIAS_TABLE.get(cand_raw)
+        if target and target in CANONICAL_SOV_FIELDS and target not in seen_targets:
+            if _is_semantically_safe(norm_source, target):
+                val_bonus, val_note = _evaluate_value_evidence(target, sample_values)
+                eff_score = round((score / 100.0 * 0.90) + val_bonus, 4)
+                valid_candidates.append((target, min(1.0, eff_score), val_note))
+                seen_targets.add(target)
 
     fuzzy_target: Optional[str] = None
     fuzzy_confidence: float = 0.0
-    fuzzy_score: float = 0.0
+    val_note: str = ""
+    is_ambiguous_margin: bool = False
+    margin_reason: str = ""
 
-    if best_result is not None:
-        best_match, fuzzy_score, best_idx = best_result
-        best_candidate = fuzzy_candidates[best_idx]
+    if valid_candidates:
+        valid_candidates.sort(key=lambda x: x[1], reverse=True)
+        fuzzy_target, fuzzy_confidence, val_note = valid_candidates[0]
 
-        if best_candidate in CANONICAL_SOV_FIELDS:
-            fuzzy_target = best_candidate
-        else:
-            fuzzy_target = _ALIAS_TABLE.get(best_candidate)
+        # Check confidence margin between top candidate and runner-up (Section 12)
+        if len(valid_candidates) > 1:
+            runner_up_target, runner_up_conf, _ = valid_candidates[1]
+            if (fuzzy_confidence - runner_up_conf) < 0.05 and fuzzy_confidence < _CONFIDENCE_APPROVED:
+                is_ambiguous_margin = True
+                margin_reason = (
+                    f"Close confidence margin ({fuzzy_confidence:.2f} vs {runner_up_conf:.2f} for '{runner_up_target}'); "
+                    "requires review."
+                )
 
-        if fuzzy_target and fuzzy_target in CANONICAL_SOV_FIELDS:
-            if _is_semantically_safe(norm_source, fuzzy_target):
-                fuzzy_confidence = round(fuzzy_score / 100.0 * 0.90, 4)
-            else:
-                fuzzy_target = None
-                fuzzy_confidence = 0.0
-
-    if fuzzy_confidence >= _CONFIDENCE_APPROVED and fuzzy_target:
+    if fuzzy_confidence >= _CONFIDENCE_APPROVED and fuzzy_target and not is_ambiguous_margin:
+        reason = f"Fuzzy token-sort match between '{norm_source}' and '{fuzzy_target}'."
+        if val_note:
+            reason += f" {val_note}"
         return SchemaMapping(
             source_column=source_col,
             target_field=fuzzy_target,
             confidence=fuzzy_confidence,
             method="fuzzy",
-            reasoning=(
-                f"Fuzzy token-sort match ({fuzzy_score:.1f}/100) between "
-                f"'{norm_source}' and '{fuzzy_target}'."
-            ),
+            reasoning=reason,
             status=_STATUS_APPROVED,
         )
 
@@ -844,6 +1024,7 @@ def _map_single_column_internal(
             "fuzzy_candidate": fuzzy_target,
             "fuzzy_confidence": fuzzy_confidence,
             "upstream_suggestion": upstream_target,
+            "sample_values": sample_values[:5] if sample_values else [],
         }
         candidates = [fuzzy_target] if fuzzy_target else CANONICAL_SOV_FIELDS[:5]
         llm_res = llm_adapter.map_column_semantically(
@@ -879,7 +1060,6 @@ def _map_single_column_internal(
             if target is None or status_str == "rejected":
                 final_status = _STATUS_REJECTED
             else:
-                # LLM results always require human review regardless of stated status
                 final_status = _STATUS_NEEDS_REVIEW
 
             return SchemaMapping(
@@ -893,15 +1073,19 @@ def _map_single_column_internal(
 
     # Review-confidence fuzzy fallback
     if fuzzy_confidence >= _CONFIDENCE_REVIEW and fuzzy_target:
+        reason = f"Moderate confidence match -> '{fuzzy_target}'."
+        if val_note:
+            reason += f" {val_note}"
+        if margin_reason:
+            reason += f" [{margin_reason}]"
+        else:
+            reason += " Requires human review."
         return SchemaMapping(
             source_column=source_col,
             target_field=fuzzy_target,
             confidence=fuzzy_confidence,
             method="fuzzy",
-            reasoning=(
-                f"Moderate confidence match ({fuzzy_score:.1f}/100) -> '{fuzzy_target}'. "
-                "Requires human review."
-            ),
+            reasoning=reason,
             status=_STATUS_NEEDS_REVIEW,
         )
 
@@ -941,8 +1125,11 @@ def _map_single_column_internal(
 # Conflict Validation
 # ---------------------------------------------------------------------------
 
-def _validate_and_resolve_conflicts(mappings: list[SchemaMapping]) -> list[SchemaMapping]:
-    """Detects duplicate target collisions and applies confidence penalties."""
+def _validate_and_resolve_conflicts(
+    mappings: list[SchemaMapping],
+    sample_rows: Optional[list[dict[str, Any]]] = None,
+) -> list[SchemaMapping]:
+    """Detects duplicate target collisions and applies tier-aware, data-aware resolution."""
     target_to_cols: dict[str, list[int]] = {}
     for idx, m in enumerate(mappings):
         if m.target_field and m.status != _STATUS_REJECTED:
@@ -952,21 +1139,63 @@ def _validate_and_resolve_conflicts(mappings: list[SchemaMapping]) -> list[Schem
 
     for target_field, indices in target_to_cols.items():
         if len(indices) > 1:
-            competing_cols = [mappings[i].source_column for i in indices]
-            for i in indices:
-                orig = mappings[i]
-                new_conf = round(orig.confidence * 0.60, 4)
-                validated[i] = SchemaMapping(
-                    source_column=orig.source_column,
-                    target_field=orig.target_field,
-                    confidence=new_conf,
-                    method=orig.method,
-                    reasoning=(
-                        f"{orig.reasoning} [CONFLICT: Multiple columns {competing_cols} "
-                        f"mapped to target '{target_field}'; marked for review.]"
-                    ),
-                    status=_STATUS_NEEDS_REVIEW,
-                )
+            # Check if there is an empty-column vs populated-column asymmetry
+            empty_indices = []
+            populated_indices = []
+            if sample_rows:
+                for i in indices:
+                    col_name = mappings[i].source_column
+                    non_empty = sum(
+                        1 for r in sample_rows
+                        if r.get(col_name) is not None and str(r.get(col_name)).strip() != ""
+                    )
+                    if non_empty > 0:
+                        populated_indices.append(i)
+                    else:
+                        empty_indices.append(i)
+
+            # If some columns are populated and others are 100% empty,
+            # eliminate the empty ghost columns from this target so they don't corrupt real mappings
+            if populated_indices and empty_indices:
+                for i in empty_indices:
+                    orig = mappings[i]
+                    validated[i] = SchemaMapping(
+                        source_column=orig.source_column,
+                        target_field=None,
+                        confidence=0.0,
+                        method="unmapped",
+                        reasoning=(
+                            f"Column '{orig.source_column}' contains no populated data rows; "
+                            f"target '{target_field}' assigned to populated column."
+                        ),
+                        status=_STATUS_REJECTED,
+                    )
+                active_indices = populated_indices
+            else:
+                active_indices = indices
+
+            if len(active_indices) > 1:
+                # True conflict among active columns (e.g. contents and contents_value both populated)
+                competing_cols = [mappings[i].source_column for i in active_indices]
+                for i in active_indices:
+                    orig = mappings[i]
+                    new_conf = round(orig.confidence * 0.60, 4)
+                    validated[i] = SchemaMapping(
+                        source_column=orig.source_column,
+                        target_field=orig.target_field,
+                        confidence=new_conf,
+                        method=orig.method,
+                        reasoning=(
+                            f"{orig.reasoning} [CONFLICT: Multiple columns {competing_cols} "
+                            f"mapped to target '{target_field}'; marked for review.]"
+                        ),
+                        status=_STATUS_NEEDS_REVIEW,
+                    )
+            elif len(active_indices) == 1:
+                # Exactly one populated column won after filtering out empty ghost columns
+                winner_idx = active_indices[0]
+                winner_mapping = mappings[winner_idx]
+                validated[winner_idx] = winner_mapping
 
     return validated
 
@@ -982,22 +1211,31 @@ def _build_canonical_mapped_rows(
     """
     Builds canonical mapped rows with exactly the 17 canonical fields in exact order.
     NEVER modifies raw values. Missing targets are set to None (not fabricated).
+    Prioritizes highest confidence and populated columns for each target.
     """
-    source_to_target: dict[str, str] = {
-        m.source_column: m.target_field
-        for m in mappings
-        if m.target_field and m.status != _STATUS_REJECTED
-    }
+    active_mappings = sorted(
+        [m for m in mappings if m.target_field and m.status != _STATUS_REJECTED],
+        key=lambda m: (1 if m.method == "exact" else 0, m.confidence),
+        reverse=True,
+    )
 
     mapped_rows: list[dict[str, Any]] = []
     for row in source_rows:
         canonical_row: dict[str, Any] = {field: None for field in CANONICAL_SOV_FIELDS}
 
-        for src_col, val in row.items():
-            target_field = source_to_target.get(src_col)
-            if target_field and target_field in canonical_row:
-                if canonical_row[target_field] is None:
-                    canonical_row[target_field] = val
+        # First pass: populate from highest-confidence sources with non-empty cell values
+        for m in active_mappings:
+            target = m.target_field
+            if target in canonical_row and canonical_row[target] is None:
+                val = row.get(m.source_column)
+                if val is not None and str(val).strip() != "":
+                    canonical_row[target] = val
+
+        # Second pass: if target is still None, take whatever value was in the mapped column
+        for m in active_mappings:
+            target = m.target_field
+            if target in canonical_row and canonical_row[target] is None:
+                canonical_row[target] = row.get(m.source_column)
 
         mapped_rows.append(canonical_row)
 
@@ -1035,6 +1273,7 @@ def map_columns(
             source_col=col,
             agent1_suggestion=(agent1_suggestions or {}).get(col),
             llm_adapter=llm_adapter,
+            all_source_columns=source_columns,
         )
         for col in source_columns
     ]
@@ -1068,10 +1307,15 @@ def map_schema(
                 seen.add(col)
 
     raw_mappings = [
-        _map_single_column_internal(source_col=col, llm_adapter=llm_adapter)
+        _map_single_column_internal(
+            source_col=col,
+            llm_adapter=llm_adapter,
+            sample_values=[r.get(col) for r in sheet_data if r.get(col) is not None],
+            all_source_columns=source_columns,
+        )
         for col in source_columns
     ]
-    validated_mappings = _validate_and_resolve_conflicts(raw_mappings)
+    validated_mappings = _validate_and_resolve_conflicts(raw_mappings, sample_rows=sheet_data)
     mapped_rows = _build_canonical_mapped_rows(sheet_data, validated_mappings)
 
     unmapped_source = [
@@ -1125,7 +1369,7 @@ def map_agent1_output(
 
     # 2. Extract sheet analysis and sample rows
     sheet_analysis = data.get("sheet_analysis", {})
-    selected_sheet = sheet_analysis.get("selected_sheet", "")
+    selected_sheet = sheet_analysis.get("selected_sheet") or data.get("selected_sheet", "")
     sheets = sheet_analysis.get("sheets", [])
 
     sheet_obj: Optional[dict[str, Any]] = None
@@ -1156,6 +1400,21 @@ def map_agent1_output(
                     }
                     parsed_rows.append(row_dict)
 
+    # Support root-level raw_headers and sample_rows contract from Agent 1
+    if not source_columns and "raw_headers" in data:
+        raw_headers = data.get("raw_headers", [])
+        if isinstance(raw_headers, list):
+            source_columns = [str(c) if c is not None else f"Col_{i}" for i, c in enumerate(raw_headers)]
+        root_samples = data.get("sample_rows", [])
+        if root_samples and isinstance(root_samples, list):
+            for data_row in root_samples:
+                if isinstance(data_row, list):
+                    row_dict = {
+                        source_columns[i]: data_row[i]
+                        for i in range(min(len(source_columns), len(data_row)))
+                    }
+                    parsed_rows.append(row_dict)
+
     if not source_columns and "raw_rows" in data:
         parsed_rows = data.get("raw_rows", [])
         seen_cols: set[str] = set()
@@ -1177,12 +1436,14 @@ def map_agent1_output(
             source_col=col,
             agent1_suggestion=upstream_suggestions.get(col),
             llm_adapter=llm_adapter,
+            sample_values=[r.get(col) for r in parsed_rows if r.get(col) is not None],
+            all_source_columns=source_columns,
         )
         for col in source_columns
     ]
 
     # 5. Validate & resolve conflicts
-    validated_mappings = _validate_and_resolve_conflicts(raw_mappings)
+    validated_mappings = _validate_and_resolve_conflicts(raw_mappings, sample_rows=parsed_rows)
 
     # 6. Build canonical rows
     mapped_rows = _build_canonical_mapped_rows(parsed_rows, validated_mappings)
@@ -1257,6 +1518,7 @@ class SchemaMappingAgent:
         raw_columns: Optional[list[str]] = state.metadata.get("raw_columns")
         agent1_output: Optional[dict[str, Any]] = state.metadata.get("agent1_output")
         agent1_suggestions: dict[str, dict] = state.metadata.get("agent1_suggestions", {})
+        raw_rows: Optional[list[dict[str, Any]]] = state.metadata.get("raw_rows")
 
         if agent1_output and isinstance(agent1_output, dict):
             # Full Agent 1 JSON contract available
@@ -1281,10 +1543,14 @@ class SchemaMappingAgent:
                     source_col=col,
                     agent1_suggestion=agent1_suggestions.get(col),
                     llm_adapter=self._llm_adapter,
+                    sample_values=[r.get(col) for r in raw_rows if r.get(col) is not None] if raw_rows else None,
+                    all_source_columns=raw_columns,
                 )
                 for col in raw_columns
             ]
-            mappings = _validate_and_resolve_conflicts(raw_mappings)
+            mappings = _validate_and_resolve_conflicts(raw_mappings, sample_rows=raw_rows)
+            if raw_rows:
+                state.metadata["mapped_rows"] = _build_canonical_mapped_rows(raw_rows, mappings)
             unmapped_source = [
                 m.source_column for m in mappings
                 if m.status == _STATUS_REJECTED or m.target_field is None
